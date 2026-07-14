@@ -1,0 +1,48 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+ENV/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Streamlit ---
+.streamlit/
+
+# --- Data files (often large / not meant for git) ---
+*.csv
+*.tsv
+Fake.csv
+True.csv
+preprocessed_fake_real_news.csv
+
+# --- Trained models / pickles (can be large; use Git LFS or releases instead) ---
+*.pkl
+*.pickle
+all_models.pkl
+
+# --- NLTK downloads ---
+nltk_data/
+
+# --- Logs / OS / editor junk ---
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Env / secrets ---
+.env
+*.env
