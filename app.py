@@ -34,6 +34,43 @@ st.set_page_config(page_title="Fake News Detector", page_icon="📰", layout="wi
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CANDIDATE_NAMES = ["all_model.pkl", "all_models.pkl"]
 
+# Google Drive fallback — used only if no pickle is found locally
+# (e.g. on Streamlit Cloud, where the 100MB file isn't committed to GitHub).
+GDRIVE_FILE_ID = "1nfir5pQWlzSNOuy44InBiK9Lp9CyR-EG"
+GDRIVE_TARGET_NAME = "all_model.pkl"
+
+
+def find_local_model():
+    for name in CANDIDATE_NAMES:
+        p = os.path.join(BASE_DIR, name)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def download_model_from_drive():
+    target = os.path.join(BASE_DIR, GDRIVE_TARGET_NAME)
+    try:
+        import gdown
+    except ImportError:
+        st.error(
+            "`gdown` isn't installed. Add `gdown` to requirement.txt to enable "
+            "automatic download from Google Drive."
+        )
+        st.stop()
+
+    with st.spinner("Downloading all_model.pkl from Google Drive (~100MB, first run only)..."):
+        url = f"https://drive.google.com/uc?id={GDRIVE_FILE_ID}"
+        gdown.download(url, target, quiet=False)
+
+    if not os.path.exists(target) or os.path.getsize(target) == 0:
+        st.error(
+            "Download failed. Make sure the Google Drive file's sharing is set "
+            "to 'Anyone with the link', then rerun the app."
+        )
+        st.stop()
+    return target
+
 
 @st.cache_resource(show_spinner="Loading trained models...")
 def load_models(path, mtime):
@@ -41,19 +78,9 @@ def load_models(path, mtime):
         return pickle.load(f)
 
 
-model_path = None
-for name in CANDIDATE_NAMES:
-    p = os.path.join(BASE_DIR, name)
-    if os.path.exists(p):
-        model_path = p
-        break
-
+model_path = find_local_model()
 if model_path is None:
-    st.error(
-        "Couldn't find `all_model.pkl` (or `all_models.pkl`) next to app.py. "
-        "Place your pickle file in the same folder and rerun."
-    )
-    st.stop()
+    model_path = download_model_from_drive()
 
 data = load_models(model_path, os.path.getmtime(model_path))
 trained_models = data["models"]          # {"LR__Text Only": (model, preds, y_test), ...}
