@@ -23,6 +23,7 @@ import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 import seaborn as sns
+from scipy.sparse import hstack, csr_matrix
 from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.naive_bayes import MultinomialNB
@@ -51,7 +52,13 @@ st.set_page_config(
 )
 
 RANDOM_STATE = 42
-DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "all_models.pkl")
+# DATA_DIR: folder that contains all_models.pkl. Defaults to the app.py folder,
+# but can be overridden by setting the DATA_DIR environment variable
+# (e.g. if the pkl lives in a different folder than the app).
+DATA_DIR = os.environ.get(
+    "DATA_DIR", os.path.dirname(os.path.abspath(__file__))
+)
+DEFAULT_MODEL_PATH = os.path.join(DATA_DIR, "all_models.pkl")
 
 # --------------------------------------------------------------------------
 # Text preprocessing (mirrors the notebook's pipeline, kept dependency-light
@@ -141,9 +148,26 @@ def load_preprocessed_csv(file_bytes):
     return df
 
 
+def _unpack_all_models(data):
+    """Validate & unpack the pkl dict produced by the notebook:
+    {'models': {...}, 'tfidf_A': ..., 'tfidf_B': ..., 'scaler_B': ...}
+    Returns the dict as-is (still keyed access) after checking required keys
+    exist, so callers get a clear error instead of a silent KeyError later.
+    """
+    required = ["models", "tfidf_A", "tfidf_B", "scaler_B"]
+    missing = [k for k in required if k not in data]
+    if missing:
+        raise KeyError(
+            f"all_models.pkl is missing expected key(s): {missing}. "
+            f"Found keys: {list(data.keys())}"
+        )
+    return data
+
+
 @st.cache_resource(show_spinner=False)
 def load_models_pkl_bytes(file_bytes):
-    return pickle.load(io.BytesIO(file_bytes))
+    data = pickle.load(io.BytesIO(file_bytes))
+    return _unpack_all_models(data)
 
 
 @st.cache_resource(show_spinner=False)
@@ -151,7 +175,8 @@ def load_models_pkl_path(path, mtime):
     # `mtime` is only in the signature so Streamlit's cache invalidates
     # automatically if you swap in a newer all_models.pkl on disk.
     with open(path, "rb") as f:
-        return pickle.load(f)
+        data = pickle.load(f)
+    return _unpack_all_models(data)
 
 
 # --------------------------------------------------------------------------
@@ -188,24 +213,53 @@ if df is None:
 st.sidebar.subheader("2. Trained models")
 saved_models = None
 model_source = None
+model_load_error = None
 
+# Auto-load from DATA_DIR/all_models.pkl (same pattern used in the notebook):
+#
+#   with open(f'{DATA_DIR}/all_models.pkl', 'rb') as f:
+#       data = pickle.load(f)
+#   trained_models = data['models']
+#   tfidf_A = data['tfidf_A']
+#   tfidf_B = data['tfidf_B']
+#   scaler_B = data['scaler_B']
+#
 if os.path.exists(DEFAULT_MODEL_PATH):
-    mtime = os.path.getmtime(DEFAULT_MODEL_PATH)
-    saved_models = load_models_pkl_path(DEFAULT_MODEL_PATH, mtime)
-    model_source = "disk"
-    st.sidebar.success("✅ all_models.pkl loaded from disk (cached)")
+    try:
+        mtime = os.path.getmtime(DEFAULT_MODEL_PATH)
+        saved_models = load_models_pkl_path(DEFAULT_MODEL_PATH, mtime)
+        model_source = "disk"
+        st.sidebar.success(f"✅ all_models.pkl loaded from {DATA_DIR}")
+    except Exception as e:
+        model_load_error = str(e)
+        st.sidebar.error(f"⚠️ Found all_models.pkl but couldn't load it: {e}")
 
 pkl_up = st.sidebar.file_uploader(
     "…or upload/override all_models.pkl", type="pkl"
 )
 if pkl_up is not None:
-    saved_models = load_models_pkl_bytes(pkl_up.getvalue())
-    model_source = "upload"
+    try:
+        saved_models = load_models_pkl_bytes(pkl_up.getvalue())
+        model_source = "upload"
+        model_load_error = None
+        st.sidebar.success("✅ all_models.pkl loaded from upload")
+    except Exception as e:
+        model_load_error = str(e)
+        st.sidebar.error(f"⚠️ Couldn't load uploaded pkl: {e}")
 
-if saved_models is None:
+if saved_models is None and model_load_error is None:
     st.sidebar.warning(
-        "No all_models.pkl found. Place your file next to app.py, or upload it here."
+        f"No all_models.pkl found in `{DATA_DIR}`. Place your file there, "
+        "set the DATA_DIR environment variable to point at it, or upload it "
+        "above to use your real trained models instead of the demo ones."
     )
+
+# Convenience aliases matching the notebook's variable names, for use
+# throughout the rest of the app (Train & Evaluate / Live Prediction pages).
+trained_models = saved_models["models"] if saved_models else None
+tfidf_A = saved_models["tfidf_A"] if saved_models else None
+tfidf_B = saved_models["tfidf_B"] if saved_models else None
+scaler_B = saved_models["scaler_B"] if saved_models else None
 
 st.sidebar.subheader("3. Navigate")
 page = st.sidebar.radio(
@@ -450,8 +504,9 @@ elif page == "Train & Evaluate":
     st.title("🛠️ Train & Evaluate")
 
     if saved_models is not None:
-        st.success("Using models loaded from `all_models.pkl`.")
-        trained = saved_models["models"]
+        st.success("Using your real trained models loaded from `all_models.pkl` "
+                    "(not the demo models).")
+        trained = trained_models
         rows = []
         for key, (model, preds, y_test) in trained.items():
             model_name, version = key.split("__")
@@ -568,24 +623,49 @@ elif page == "Live Prediction":
                             placeholder="Type or paste text here...")
 
     if saved_models is not None:
-        model_choice = st.selectbox("Model", list(saved_models["models"].keys()))
+        model_choice = st.selectbox("Model", list(trained_models.keys()))
         if st.button("Predict", type="primary") and text_in.strip():
             cleaned = clean_text_basic(text_in)
             version = model_choice.split("__")[1]
-            tfidf = saved_models["tfidf_A"] if version == "Text Only" else saved_models["tfidf_B"]
-            X = tfidf.transform([cleaned])
-            model = saved_models["models"][model_choice][0]
-            pred = model.predict(X)[0]
-            label = "🟢 Real" if pred == 1 else "🔴 Fake"
-            st.subheader(f"Prediction: {label}")
-            if hasattr(model, "predict_proba"):
-                proba = model.predict_proba(X)[0]
-                prob_df = pd.DataFrame({"class": ["Fake", "Real"], "probability": proba})
-                fig, ax = plt.subplots(figsize=(4, 3))
-                sns.barplot(data=prob_df, x="class", y="probability",
-                            hue="class", palette="Set2", legend=False, ax=ax)
-                ax.set_ylim(0, 1)
-                st.pyplot(fig, clear_figure=True)
+            model = trained_models[model_choice][0]
+
+            try:
+                if version == "Text Only":
+                    X = tfidf_A.transform([cleaned])
+                else:
+                    # "Text + Meta" version: TF-IDF features concatenated with
+                    # scaled meta features, mirroring the notebook's feature
+                    # engineering for tfidf_B / scaler_B. Adjust the meta
+                    # features below if your notebook computed different ones.
+                    X_text = tfidf_B.transform([cleaned])
+                    meta = np.array([[
+                        len(text_in),                              # char length
+                        len(text_in.split()),                      # word count
+                        text_in.count("!"),                        # exclamation marks
+                        text_in.count("?"),                        # question marks
+                        sum(1 for w in text_in.split() if w.isupper()),  # ALLCAPS words
+                    ]])
+                    meta_scaled = scaler_B.transform(meta)
+                    X = hstack([X_text, csr_matrix(meta_scaled)])
+
+                pred = model.predict(X)[0]
+                label = "🟢 Real" if pred == 1 else "🔴 Fake"
+                st.subheader(f"Prediction: {label}")
+                if hasattr(model, "predict_proba"):
+                    proba = model.predict_proba(X)[0]
+                    prob_df = pd.DataFrame({"class": ["Fake", "Real"], "probability": proba})
+                    fig, ax = plt.subplots(figsize=(4, 3))
+                    sns.barplot(data=prob_df, x="class", y="probability",
+                                hue="class", palette="Set2", legend=False, ax=ax)
+                    ax.set_ylim(0, 1)
+                    st.pyplot(fig, clear_figure=True)
+            except Exception as e:
+                st.error(
+                    f"Prediction failed: {e}. This usually means the meta "
+                    "features built here don't match what `scaler_B` was fit "
+                    "on in the notebook — update the `meta` array above to "
+                    "match your notebook's exact feature engineering."
+                )
     else:
         st.info(
             "No `all_models.pkl` uploaded. Train demo models on the "
